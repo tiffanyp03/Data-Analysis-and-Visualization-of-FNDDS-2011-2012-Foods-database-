@@ -1,0 +1,834 @@
+---
+title: "Data Analysis and Visualization Project"
+author: "Tiffany Pang"
+date: "4/28/2017"
+output:
+  html_document: default
+---
+
+
+## **Creating a new Category column**
+
+***In order to analyze and visualize data in the FNDDS 2011-2012 Foods database, Bob Horton’s starter script is used to create the database on the machine from flat files.***
+
+```{r starter_script, warning=FALSE, message=FALSE}
+
+data_dir <- "FNDDS_2011"
+
+fortification <- c(`0`="none", `1`="fortified_product", `2`="contains fortified ingredients")
+
+fndds_tables <- list(
+	AddFoodDesc = list(
+			title="Additional Food Descriptions",
+			column_types=c(
+				food_code="integer", # foreign key
+				seq_num="integer", 
+				start_date="date", 
+				end_date="date", 
+				additional_food_description="text"),
+			sep="^"
+		),
+	FNDDSNutVal = list(
+			title="FNDDS Nutrient Values",
+			column_types=c(
+				food_code="integer",
+				nutrient_code="integer",	# Nutrient Descriptions table
+				start_date="date", 
+				end_date="date", 
+				nutrient_value="double"
+				),
+			sep="^"
+		),
+	FNDDSSRLinks = list(
+			title="FNDDS-SR Links",	# see p34 of fndds_2011_2012_doc.pdf
+			column_types=c(
+				food_code="integer",
+				start_date="date", 
+				end_date="date", 
+				seq_num="integer",
+				sr_code="integer",
+				sr_descripton="text",
+				amount="double",
+				measure="char[3]",	# lb, oz, g, mg, cup, Tsp, qt, fluid ounce, etc
+				portion_code="integer",
+				retention_code="integer",
+				flag="integer",
+				weight="double",
+				change_type_to_sr_code="char[1]",	# D=data change; F=food change
+				change_type_to_weight="char[1]",
+				change_type_to_retn_code="char[1]"
+				),
+			sep="^"
+		),
+	FoodPortionDesc = list(
+			title="Food Portion Descriptions",
+			column_types=c(
+				portion_code="integer", 	# foreign key
+				start_date="date",
+				end_date="date",
+				portion_description="text",
+				change_type="char[1]"
+			),
+			sep="^"
+		),
+	FoodSubcodeLinks = list(
+			title="Food code-subcode links",
+			column_types=c(
+				food_code="integer",
+				subcode="integer",
+				start_date="date",
+				end_date="date"
+				),
+			sep="^"
+		),
+	FoodWeights = list(
+			title="Food Weights",
+			column_types=c(
+				food_code="integer",	# foreign key
+				subcode="integer",
+				seq_num="integer",
+				portion_code="integer",	# food portion description id
+				start_date="date",
+				end_date="date",
+				portion_weight="double",	# missing values = -9
+				change_type="char[1]"	# D=data change, F=food change
+				),
+			sep="^"
+		),
+	MainFoodDesc = list(
+			title="Main Food Descriptions",
+			column_types=c(
+				food_code="integer", 
+				start_date="date", 
+				end_date="date", 
+				main_food_description="character", 
+				fortification_id="integer"),
+			sep="^"
+		),
+	ModDesc = list(
+			title="Modifications Descriptons",
+			column_types=c(
+				modification_code="integer",
+				start_date="date", 
+				end_date="date", 
+				modification_description="text",
+				food_code="integer"
+				
+				),
+			sep="^"
+		),
+	ModNutVal = list(
+			title="Modifications Nutrient Values",
+			column_types=c(
+				modification_code="integer",
+				nutrient_code="integer",
+				start_date="date", 
+				end_date="date", 
+				nutrient_value="double"
+				),
+			sep="^"
+		),
+	MoistNFatAdjust = list(
+			title="Moisture & Fat Adjustments",	# to account for changes during cooking
+			column_types=c(
+				food_code="integer",
+				start_date="date", 
+				end_date="date", 
+				moisture_change="double",
+				fat_change="double",
+				type_of_fat="integer"	# SR code or food code				
+				),
+			sep="^"
+		),
+	NutDesc = list(
+			title="Nutrient Descriptions",
+			column_types=c(
+				nutrient_code="integer",
+				nutrient_description="text",
+				tagname="text",
+				unit="text",
+				decimals="integer"	# decimal places
+				),
+			sep="^"
+		),
+	SubcodeDesc = list(
+			title="Subcode Descriptions",
+			column_types=c(
+				subcode="integer",	# key; 0=use default gram weights
+				start_date="date",
+				end_date="date",
+				subcode_description="text"
+				),
+			sep="^"
+		)
+)
+
+# flat file to a data frame: call for each table
+assign_data_frame <- function(tbl_name){
+	tbl <- read.table(
+		file.path(data_dir, paste0(tbl_name, ".txt")), 
+		sep="^",
+		quote="~",
+		stringsAsFactors=FALSE)
+	# drop last (empty) column
+	tbl <- tbl[1:(length(tbl)-1)]
+	names(tbl) <- names(fndds_tables[[tbl_name]][["column_types"]])
+	assign(tbl_name, tbl, envir = .GlobalEnv)
+}
+
+# flat file to database
+fndds2sqlite <- function(data_dir, table_details, sqlite_filename){
+
+	library("RSQLite")
+	con <- dbConnect(SQLite(), sqlite_filename)
+
+	for (tbl_name in names(table_details)){
+		file_name <- paste0(tbl_name, ".txt")
+		assign_data_frame(tbl_name)
+		tbl <- get(tbl_name)
+		dbWriteTable(con, tbl_name, tbl, row.names = FALSE)
+	}
+	
+	dbDisconnect(con)
+}
+
+fndds2sqlite("FNDDS_2011", fndds_tables, "fndds.sqlite")
+library(DBI)
+
+for (tbl in c("FNDDSNutVal", "MainFoodDesc", "NutDesc"))
+	assign_data_frame(tbl)
+
+library(dplyr)
+library(tidyr)
+
+# Make a simplified selection of foods.
+# TO DO: have MainFoodDesc be a tbl sourced from SQLite.
+get_selected_foods <- function(){
+	# Pull out all "Not Further Specified" foods as a wide selection of reasonably generic items.
+	generics <- MainFoodDesc %>% 
+		filter( grepl(", NFS", main_food_description )) %>%
+		filter(!grepl("infant formula", main_food_description, ignore.case = TRUE ) )
+
+	# Raw fruits
+	# Berries are covered by "Berries, raw, NFS" and "Berries, frozen, NFS"
+	fruits <- MainFoodDesc %>% 
+		filter( grepl("^6", food_code) ) %>%
+		filter( grepl("^([^,\\(]+), raw$", main_food_description) ) %>% 
+		filter( !grepl("berries", main_food_description) )
+
+	# Raw vegetables
+	# Potatoes are covered by "White potato, NFS", "Sweet potato, NFS", etc.
+	vegetables <- MainFoodDesc %>% 
+		filter( grepl("^7", food_code) ) %>%
+		filter(!grepl("potato", main_food_description)) %>%
+		filter( grepl(", raw$", main_food_description))
+
+	# 4="legumes, nuts, and seeds"
+	nuts_and_seeds <- MainFoodDesc %>% 
+		filter( grepl("^4", food_code) ) %>%
+		mutate( firstWord = strsplit(main_food_description, " ")[[1]][1] )
+	
+	# Selected alcoholic beverages
+	# All alcoholic beverages: grepl("^93", food_code))
+	# "Cocktail, NFS" already gives us "Cocktail"
+	alcoholic_beverages <- MainFoodDesc %>% 
+		filter( main_food_description %in% c("Beer", "Wine, table, red", "Wine, table, white", 
+			"Whiskey", "Gin", "Rum", "Vodka") )
+
+	# Collect them all into one table
+	rbind(generics, fruits, vegetables, alcoholic_beverages) %>%
+		select( food_code, main_food_description, fortification_id )  %>% 
+		filter( nchar(main_food_description) < 20 ) %>%
+		mutate( main_food_description = gsub("(, NFS|, raw)", "", main_food_description) ) 
+
+}
+
+foods <- get_selected_foods()	# 163 items
+
+```
+
+***The following code is then used to create a new column named Category based on Appendix E. Food/Beverage Coding Scheme, and appended to food_nutrient_df.***
+
+```{r append catagory column, warning = FALSE, message=FALSE}
+library(sqldf)
+
+long_food_nutrients_food_code <-
+  sqldf(
+    "SELECT f.food_code, nd.nutrient_description, nv.nutrient_value
+    FROM foods f
+    INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code
+    INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code"
+  )
+
+food_code_dataframe <- spread(long_food_nutrients_food_code, food_code, nutrient_value, fill=0)
+food_code_mat <- t(as.matrix(food_code_dataframe[-1]))
+colnames(food_code_mat) <- food_code_dataframe$nutrient_description
+
+food_code <- as.integer(row.names(food_code_mat))
+Category <- rep("dairy", length(food_code))
+temp_df <- data.frame(food_code, Category, stringsAsFactors=F)
+
+temp_df$Category[temp_df$food_code>=94000000] <- "protein powder"
+temp_df$Category[temp_df$food_code<94000000] <- "alcohol"
+temp_df$Category[temp_df$food_code<93000000] <- "sugars"
+temp_df$Category[temp_df$food_code<90000000] <- "fats"
+temp_df$Category[temp_df$food_code<80000000] <- "vegetables"
+temp_df$Category[temp_df$food_code<70000000] <- "fruits"
+temp_df$Category[temp_df$food_code<60000000] <- "grains"
+temp_df$Category[temp_df$food_code<50000000] <- "legumes,nuts,seeds"
+temp_df$Category[temp_df$food_code<40000000] <- "eggs"
+temp_df$Category[temp_df$food_code<30000000] <- "meat,fish"
+temp_df$Category[temp_df$food_code<20000000] <- "dairy"
+
+food_nutrient_df <- as.data.frame(food_code_mat, stringsAsFactors = FALSE)
+food_nutrient_df <- cbind(food_nutrient_df, Category=temp_df$Category)
+```
+
+***Necessary changes are then made to the dataframe for further exploratory data analysis***
+
+```{r warning = FALSE, message=FALSE}
+# remove the first 19 columns of the dataframe
+food_df <- food_nutrient_df[, -c(1:19)]
+
+# replace spaces in column names with underscores
+library(stringr)
+colnames(food_df) <- str_replace_all(colnames(food_df),"[[:punct:]\\s]+","_")
+```
+
+***The following code was used to find the count of each food category.***
+```{r category count}
+as.data.frame(table(food_df$Category))
+```
+
+***Check the class of all variables.***
+```{r check class}
+as.data.frame(sapply(food_df, class))
+```
+
+***Summary of the data.***
+```{r data summary}
+summary(food_df)
+```
+\newpage
+
+## **Data Visualization with ggplot**
+
+```{r}
+library(ggplot2)
+
+# Visualize the count of each Food Category
+g <- ggplot(food_df, aes(x=Category)) 
+g + geom_bar(aes(fill = Category)) + 
+  labs(title = "Count of Each Food Category\n") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+\newpage
+```{r}
+# Boxplot of Total Fat by Food Category
+ggplot(food_df, aes(x=Category, y=Total_Fat)) + # categorical variable on x-axis
+  geom_boxplot(aes(fill = Category)) +
+  labs(title = "Total Fat by Food Category\n") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+***The category 'fats' contains the highest total_fat, followed by 'legumes,nuts,seeds'. 'dairy' and 'meat,fish' categories contain the same amount of total_fat.***
+\newpage
+```{r}
+# Boxplot of Carbohydrate by Food Category
+ggplot(food_df, aes(x=Category, y=Carbohydrate)) + # categorical variable on x-axis
+  geom_boxplot(aes(fill = Category)) + coord_flip() +
+  labs(title = "Carbohydrate by Food Category\n") +
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+***Sugars contain the highest amount of carbohydrate, followed by grains.***
+\newpage
+```{r}
+# Interleaved histogram of fiber_total_dietary by Food Category
+ggplot(food_df, aes(x=Fiber_total_dietary, fill=Category)) +
+  geom_histogram(position = "dodge", binwidth = 4) +
+  labs(title = "Fiber_total_dietary by Food Category\n") +
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+***Grains, legumes, nuts, seeds and fruits contain the highest total dietary fiber and alcohol, diary and fats contain no fiber.***
+\newpage
+```{r}
+# Energy as a function of Total_Fat for each Food Category
+ggplot(food_df, aes(x = Total_Fat, y = Energy, colour = Category)) +
+  geom_point() +
+  facet_wrap( ~ Category) + 
+  labs(title="Energy as a function of Total_Fat for each Food Category\n", x="Total_Fat", y="Energy") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=12, face="bold", color="darkgreen"))
+```
+***Fats category has the highest amount of total_fat and energy, whereas vegetables category has low total_fat and also low energy.***
+\newpage
+```{r}
+# Scatterplot of Energy as a Function of Water by Each Food Category
+ggplot(food_df, aes(x=Water,y=Energy)) +
+  geom_point(aes(fill=Category, color=Category), size=2) +
+  labs(title="Energy as a Function of Water by Each Food Category\n") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=12, face="bold", color="darkgreen"))
+```
+***As the water content of the food goes up, it contains lower energy. Water and energy are inversely correlated. Again, here vegetables have the highest water content and provide lowest energy.***
+\newpage
+```{r}
+# Scatterplot of Cholesterol as a function of Fatty_acids_total_saturated
+ggplot(food_df, aes(x=Fatty_acids_total_saturated, y=Cholesterol)) + 
+  geom_point(aes(shape=Category, color=Category), size=3.5) +
+  scale_shape_manual(values=c(6, 4, 18, 17, 5, 16, 15, 8, 10, 11)) + 
+  labs(title="Scatterplot of Cholesterol as a function of Fatty_acids_total_saturated for each Food Category\n") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=12, face="bold", color="darkgreen"))
+```
+***Fats category has the highest total saturated fatty acids and cholesterol. Meat and fish have second highest cholesterol, but dairy has the second highest total saturated fatty acids.***
+\newpage
+```{r}
+# Sugars_total for each Food Category
+ggplot(food_df, aes(x=Sugars_total, y=Category)) + 
+  geom_point(aes(color=Category)) + 
+  labs(title="Sugars_total for each Food Category\n") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+***Sugars category has the highest total sugars, followed by fruits. Protein powder and fats have no sugar content.***
+\newpage
+```{r}
+# Amount of Calcium content for Each Food Category
+ggplot(food_df, aes(x=Category, y=Calcium))+
+  geom_bar(stat="identity", aes(fill=Category, color=Category)) +
+  coord_polar(theta = "x", direction=1 ) + 
+  labs(title="Amount of Calcium content for Each Food Category\n") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=14, face="bold", color="darkgreen"))
+```
+***Vegetables contains the most calcium, followed by grains and dairy. Alcohol, fats and sugars do not seem to contain any calcium.***
+\newpage
+```{r warning=FALSE}
+# Histogram of Protein by each Food Category
+ggplot(food_df, aes(Protein))+ 
+  geom_histogram(aes(color=Category, fill=Category)) +
+  facet_grid(Category ~ .) + 
+  labs(title="Histogram of Protein by each Food Category\n") + 
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=16, face="bold", color="darkgreen"))
+```
+***Protein powder contains the highest protein amount, followed by meat, fish and legumes, nuts, seeds. Alcohol, fats and sugars do not contain any protein.***
+\newpage
+
+## **SQL Queries** 
+
+***Food_code column is added to the dataframe, so it can be used for joining with other tables for SQL queries.***
+```{r append Food_code column}
+df <- cbind(food_df, food_code=temp_df$food_code)
+```
+
+***The following SQL queries are written to understand and explore the dataset.***
+
+```{r}
+library(sqldf)
+#1
+sqldf("SELECT Category, count(*) AS counts FROM df GROUP BY Category")
+```
+
+```{r}
+#2
+# number of food high in Calcium
+sqldf("SELECT Category, count(*) as counts FROM df WHERE Calcium > 100
+      GROUP BY Category")
+```
+
+```{r}
+#3
+# Percentage of each food category in regards to all food categories 
+sqldf(
+  "SELECT Category, ROUND((cast(sub_query.counts as float)/sub_query.total)*100, 2) AS
+  Percentage_of_Each_Category 
+  FROM (SELECT Category, count(*) AS counts, 
+  (SELECT count(*) FROM df) AS total FROM df GROUP BY Category) AS sub_query 
+  ORDER BY Percentage_of_Each_Category DESC")
+```
+
+```{r}
+#4
+# Averages of the nutrients 
+sqldf(
+  "SELECT Category, AVG(Fatty_acids_total_monounsaturated) AS Avg_monounsat, 
+  Avg(Fatty_acids_total_polyunsaturated) AS Avg_polyunsat, 
+  Avg(Fatty_acids_total_saturated) AS Avg_sat
+  FROM df
+  GROUP BY Category")
+```
+
+```{r}
+sqldf(
+  "SELECT Category, AVG(Calcium), AVG(Magnesium), AVG(Iron), AVG(Phosphorus), 
+  AVG(Potassium), AVG(Sodium), AVG(Zinc)
+  FROM df
+  GROUP BY Category")
+```
+
+```{r}
+sqldf(
+  "SELECT Category, AVG(Energy), AVG(Folate_total), AVG(Sugars_total), 
+  AVG(Total_Fat), AVG(Water)
+  FROM df
+  GROUP BY Category")
+```
+
+```{r}
+#5
+# Max, min and avgerages of some nutrients 
+sqldf(
+  "SELECT Category, MAX(Cholesterol), MIN(Cholesterol), AVG(Cholesterol)
+  FROM df
+  GROUP BY Category
+  ORDER BY Category")
+```
+
+```{r}
+sqldf(
+  "SELECT Category, MAX(Protein), MIN(Protein), AVG(Protein)
+  FROM df
+  GROUP BY Category
+  ORDER BY MAX(Protein)")
+```
+
+```{r}
+sqldf(
+  "SELECT Category, MAX(Fiber_total_dietary), MIN(Fiber_total_dietary), 
+  AVG(Fiber_total_dietary)
+  FROM df
+  GROUP BY Category
+  ORDER BY AVG(Fiber_total_dietary) DESC")
+```
+
+```{r}
+#6
+# Sum of some food nutrients 
+sqldf(
+  "SELECT Category, SUM(Total_Fat), SUM(Cholesterol), SUM(Carbohydrate), 
+  SUM(Protein), SUM(Sugars_total) 
+  FROM df 
+  GROUP BY Category")
+```
+
+```{r}
+#7
+# Distinct nutrtient descriptions 
+sqldf("SELECT DISTINCT(nutrient_description) 
+      FROM NutDesc
+      LIMIT 10")
+```
+
+```{r}
+#8
+# Main and additional food description
+head(
+  sqldf(
+    "SELECT f.main_food_description, afd.additional_food_description
+    FROM foods f
+    INNER JOIN AddFoodDesc afd ON f.food_code = afd.food_code")
+)
+```
+
+```{r}
+#9
+# Additional food description that contain words with ES
+sqldf(
+  "SELECT f.main_food_description, afd.additional_food_description
+  FROM foods f
+    INNER JOIN AddFoodDesc afd ON f.food_code = afd.food_code
+    WHERE additional_food_description LIKE '%ES%'
+    ORDER BY main_food_description")
+```
+
+```{r}
+#10
+# Food with the highest Cholesterol and Total Fat
+head(
+  sqldf(
+    "SELECT f.main_food_description, nd.nutrient_description, nv.nutrient_value
+    FROM foods f
+      INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code
+      INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code
+      WHERE nutrient_description IN ('Cholesterol', 'Total Fat')
+      ORDER BY nutrient_value DESC")
+)
+```
+
+```{r}
+#11
+# food with the max and avg nutrient_value in any one nutrient description, 
+#  ordered by max nutrient_value 
+sqldf(
+  "SELECT f.main_food_description, d.Category, nd.nutrient_description, 
+  AVG(nv.nutrient_value), MAX(nv.nutrient_value)
+  FROM FNDDSNutVal nv
+    INNER JOIN foods f ON f.food_code = nv.food_code
+    INNER JOIN df d ON f.food_code = d.food_code
+    INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code
+    GROUP BY main_food_description
+    ORDER BY MAX(nv.nutrient_value) DESC
+    LIMIT 10")
+```
+
+```{r}
+#12 
+# High Energy, low cholesterol and low sugar
+sqldf(
+  "SELECT f.main_food_description, d.Category, d.Energy, d.Cholesterol, d.Sugars_total
+  FROM foods f
+    INNER JOIN df d ON f.food_code = d.food_code
+    WHERE d.Energy >= 400 AND d.Cholesterol < 200 AND d.Sugars_total < 15
+    ORDER BY d.Energy DESC")
+```
+
+```{r}
+# High carb low fat food
+sqldf(
+  "SELECT DISTINCT f.main_food_description, d.Category, d.Carbohydrate, d.Total_Fat
+  FROM foods f
+    INNER JOIN df d ON f.food_code = d.food_code
+    WHERE Carbohydrate > 50 AND Total_Fat < 50
+    GROUP BY main_food_description
+    ORDER BY Carbohydrate DESC")
+```
+
+```{r}
+#13
+# Food highest in Energy 
+sqldf("SELECT f.main_food_description, afd.additional_food_description, 
+  d.Category, nd.nutrient_description, nv.nutrient_value 
+	FROM foods f 
+      INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code 
+      INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code
+      INNER JOIN AddFoodDesc afd ON f.food_code = afd.food_code
+      INNER JOIN df d ON f.food_code = d.food_code
+      WHERE nutrient_description = 'Energy'
+      ORDER BY nutrient_value DESC
+      LIMIT 5") 
+```
+
+```{r}
+# Food highest in Vitamin C
+sqldf("SELECT f.main_food_description, afd.additional_food_description, 
+  d.Category, nd.nutrient_description, nv.nutrient_value 
+	FROM foods f 
+      INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code 
+      INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code
+      INNER JOIN AddFoodDesc afd ON f.food_code = afd.food_code
+      INNER JOIN df d ON f.food_code = d.food_code
+      WHERE nutrient_description = 'Vitamin C'
+      ORDER BY nutrient_value DESC
+      LIMIT 5") 
+```
+
+```{r}
+# Food highest in Sugars, total
+sqldf("SELECT f.main_food_description, afd.additional_food_description, 
+  d.Category, nd.nutrient_description, nv.nutrient_value 
+	FROM foods f 
+      INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code 
+      INNER JOIN NutDesc nd ON nv.nutrient_code = nd.nutrient_code
+      INNER JOIN AddFoodDesc afd ON f.food_code = afd.food_code
+      INNER JOIN df d ON f.food_code = d.food_code
+      WHERE nutrient_description = 'Sugars, total'
+      ORDER BY nutrient_value DESC
+      LIMIT 5") 
+```
+
+```{r}
+#14
+# Max monounsat, polyunsat, and sat in 'fats', 'legumes,nuts,seeds', 'grains' catagories, 
+#  ordered by max_sat descending
+sqldf(
+  "SELECT sub_query.main_food_description, sub_query.Category, sub_query.Max_monounsat, 
+  sub_query.Max_polyunsat, sub_query.Max_sat
+  FROM
+    (SELECT f.main_food_description, d.Category, MAX(d.Fatty_acids_total_monounsaturated) 
+    AS Max_monounsat, MAX(d.Fatty_acids_total_polyunsaturated) AS Max_polyunsat, 
+    MAX(d.Fatty_acids_total_saturated) AS Max_sat
+    FROM foods f
+    INNER JOIN df d ON f.food_code = d.food_code
+    GROUP BY main_food_description) AS sub_query
+  WHERE Category IN ('fats', 'legumes,nuts,seeds', 'grains')
+  ORDER BY Max_sat DESC
+  LIMIT 5")
+```
+
+```{r}
+#15
+# Total nutrient value for each food description
+sqldf("SELECT f.main_food_description, d.Category, 
+  SUM(nv.nutrient_value) AS total_nutrient_value
+	FROM foods f 
+      INNER JOIN FNDDSNutVal nv ON f.food_code = nv.food_code 
+      INNER JOIN df d ON f.food_code = d.food_code
+      GROUP BY main_food_description
+      ORDER BY total_nutrient_value DESC
+      LIMIT 10")
+```
+
+```{r}
+#16
+# Total nutrient value for each food category
+sqldf("SELECT d.Category, SUM(nv.nutrient_value) AS total_nutrient_value
+	FROM df d
+      INNER JOIN FNDDSNutVal nv ON d.food_code = nv.food_code 
+      GROUP BY Category
+      ORDER BY total_nutrient_value DESC")
+```
+
+***The following SQL queries are used for subsetting different food category datasets.***
+```{r}
+dairy_df <- sqldf("SELECT * FROM df WHERE Category = 'dairy'")
+grains_df <- sqldf("SELECT * FROM df WHERE Category = 'grains'") 
+meat_df <- sqldf("SELECT * FROM df WHERE Category = 'meat,fish'") 
+nuts_df <- sqldf("SELECT * FROM df WHERE Category = 'legumes,nuts,seeds'") 
+fats_df <- sqldf("SELECT * FROM df WHERE Category = 'fats'") 
+fruit_veg_df <- sqldf("SELECT * FROM df WHERE Category IN ('fruits', 'vegetables')") 
+```
+
+
+***The SQL queries help us understand the ranges of nutritional content among various food categories, and also which categories/food are high in certain nutritional values. Next, some t-tests are run to infer difference in mean nutrient value for the population of foods from which this sample is drawn.***
+
+## **T-Tests**
+
+```{r}
+#1
+t.test(dairy_df$Protein, meat_df$Protein)
+```
+
+***p-value is greater than 0.05, fail to reject null hypothesis.***
+***There is no difference in mean nutrient value for these two categories.***
+
+```{r}
+#2
+t.test(nuts_df$Total_Fat, grains_df$Total_Fat)
+```
+
+***p-value is less than 0.05, reject null hypothesis.***
+***There is a difference in mean nutrient value for these two categories.***
+
+```{r}
+#3
+t.test(nuts_df$Energy, fats_df$Energy)
+```
+
+***p-value is greater than 0.05, fail to reject null hypothesis.***
+***There is no difference in mean nutrient value for these two categories.***
+
+```{r}
+#4
+t.test(fruit_veg_df$Fiber_total_dietary, grains_df$Fiber_total_dietary)
+```
+
+***p-value is greater than 0.05, fail to reject null hypothesis.***
+***There is no difference in mean nutrient value for these two categories.***
+
+#### ***T-tests reveal that some food catogories contain similar mean value of nutritional contents.***
+
+## **Correlations**
+
+```{r}
+library(reshape2)
+library(scales)
+# calculate correlation matrix
+correlationMatrix <- cor(df[, -c(47, 48)])
+# melt it into the long format
+foodMelt <- melt(correlationMatrix, varnames=c("x", "y"), value.name="Correlation")
+# order it according to the correlation
+foodMelt <- foodMelt[order(foodMelt$Correlation), ]
+```
+
+```{r fig.width=16, fig.height=14}
+# plot of correlation heatmap
+ggplot(foodMelt, aes(x=x, y=y)) + 
+  geom_tile(aes(fill = Correlation)) + 
+  scale_fill_gradient2(low = muted("deeppink4"), mid = "white", 
+                       high = "blue")+
+  labs(title="Heatmap of the Correlation of Food Nutrients") + 
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  theme(plot.title=element_text(hjust=0.5, size=20, face="bold", 
+                                color="darkgreen")) + 
+  xlab("Food Nutrients") + 
+  ylab("Food Nutrients")
+```
+
+***The following code is then used to find the highly correlated variables (correlation > 0.5).***
+
+```{r}
+library(mlbench)
+library(caret)
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.5, names = TRUE)
+highlyCorrelated
+```
+
+## **Logistic Regression**
+
+```{r warning=FALSE}
+# remove food_code column 
+fruit_veg_df$food_code <- NULL
+# set fruits as 0 and vegetables as 1
+fruit_veg_df$Category <- ifelse(fruit_veg_df$Category=='fruits', 0, 1)
+
+fit_main <- glm(Category ~ ., family = binomial(), data = fruit_veg_df)
+```
+***Summary(fit_main):***   
+***Null deviance: 1.2191e+02  on 89  degrees of freedom
+Residual deviance: 3.3005e-09  on 51  degrees of freedom
+AIC: 78***
+
+```{r warning=FALSE}
+# Fit a regression model for the null model: Category as a function of the intercept only.
+fit_null <- glm(Category ~ 1, family = binomial(), data = fruit_veg_df)
+```
+***Summary(fit_null):***
+***Null deviance: 121.91  on 89  degrees of freedom
+Residual deviance: 121.91  on 89  degrees of freedom
+AIC: 123.91***  
+
+***Next, step function is used for variable selection. The step function iterates through possible models, and return the optimal model with the lowest AIC.***
+```{r echo=FALSE, warning=FALSE, results='hide'}
+fit_step = step(fit_null, scope=list(lower=fit_null,
+                                     upper=fit_main),direction="both")
+
+```
+
+***The optimal model (AIC = 14) returned from the step function is then fitted as fit_final.***
+```{r warning=FALSE}
+# final model returned from step function
+fit_final <- glm(Category ~ Sugars_total + Sodium + Thiamin + 
+                 Fatty_acids_total_monounsaturated + Choline_total + Vitamin_B_6,
+                 family = binomial(), data = fruit_veg_df)
+summary(fit_final)
+```
+
+
+```{r warning=FALSE}
+# Written by Andy Field
+logisticPseudoR2s <- function(LogModel) {
+  dev <- LogModel$deviance 
+  nullDev <- LogModel$null.deviance 
+  modelN <-  length(LogModel$fitted.values)
+  R.l <-  1 -  dev / nullDev
+  R.cs <- 1- exp ( -(nullDev - dev) / modelN)
+  R.n <- R.cs / ( 1 - ( exp (-(nullDev / modelN))))
+  cat("Pseudo R^2 for logistic regression\n")
+  cat("Hosmer and Lemeshow R^2  ", round(R.l, 3), "\n")
+  cat("Cox and Snell R^2        ", round(R.cs, 3), "\n")
+  cat("Nagelkerke R^2           ", round(R.n, 3),    "\n")
+}
+logisticPseudoR2s(fit_final)
+
+# Anova Test 
+a_mcv <- anova(fit_final)
+a_mcv
+```
